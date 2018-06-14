@@ -24,8 +24,6 @@ type DecoderFunc func(io.Reader) ([]byte, error)
 //
 // Input may be of any length, provided there is sufficient memory available to
 // store multiple copies and the entire output.
-//
-// Multiple objects are allocated implicitly and explicitly.
 func DecodeSimple(r io.Reader) ([]byte, error) {
 	// read all input into a byte slice
 	b, err := ioutil.ReadAll(r)
@@ -39,13 +37,15 @@ func DecodeSimple(r io.Reader) ([]byte, error) {
 	// split the string into individual tokens
 	tokens := strings.Split(s, " ")
 
-	// parse each token
+	// convert each token to an integer
 	output := make([]byte, 0)
 	for _, token := range tokens {
 		n, err := strconv.ParseUint(token, 10, 8)
 		if err != nil {
 			return nil, err
 		}
+
+		// store the integer as a byte in the output buffer
 		output = append(output, byte(n))
 	}
 	return output, nil
@@ -147,8 +147,9 @@ var (
 // insignificantly small number of allocations compared to the output length.
 //
 // The output buffer never shrinks, so subsequent calls will never incur a
-// memory allocation if their input is equal to or shorter than previous calls.
-// This memory remains allocated and unusuable to the rest of the program.
+// memory allocation if their input length is equal to or shorter than previous
+// calls. This memory remains allocated and unusuable to the rest of the
+// program.
 //
 // The dynamic buffer incurs a marginal computational performance penalty.
 func DecodeDynamic(r io.Reader) ([]byte, error) {
@@ -180,6 +181,46 @@ func DecodeDynamic(r io.Reader) ([]byte, error) {
 			} else {
 				c *= 10
 				c += inputBuf[i] - '0'
+			}
+		}
+	}
+}
+
+// NewDecodeConcurrent returns a DecoderFunc that behaves similarly to
+// DecodeDynamic, except that the returned function has it own local buffers
+// that are reused in each subsequent call.
+//
+// For concurrency-safe decoding, call NewDecodeConcurrent in each spawned
+// goroutine and call the returned DecoderFunc only within the goroutine that
+// created it.
+func NewDecodeConcurrent() DecoderFunc {
+	// allocate new buffers for use only in this goroutine
+	localInputBuf := make([]byte, 4096)
+	localOutputBuf := bytes.Buffer{}
+
+	// return a DecoderFunc that will use only these buffers
+	return func(r io.Reader) ([]byte, error) {
+		localOutputBuf.Reset()
+		var c byte
+		for {
+			n, err := r.Read(localInputBuf)
+			if err == io.EOF {
+				if c != 0 {
+					localOutputBuf.WriteByte(c)
+				}
+				return localOutputBuf.Bytes(), nil
+			}
+			if err != nil {
+				return nil, err
+			}
+			for i := 0; i < n; i++ {
+				if localInputBuf[i] == ' ' {
+					localOutputBuf.WriteByte(c)
+					c = 0
+				} else {
+					c *= 10
+					c += localInputBuf[i] - '0'
+				}
 			}
 		}
 	}
